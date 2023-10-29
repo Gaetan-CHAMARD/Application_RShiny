@@ -1,0 +1,277 @@
+# Les packages
+packages <- c("RMySQL", "httr", "jsonlite", "readr", "shiny", "leaflet", "sf", "tidygeocoder", "tidyverse", "plotly", "shinydashboard", "shinyjs", "DT","rsconnect","cli")
+
+for (package in packages) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+  }
+}
+library(RMySQL)
+library(httr)
+library(jsonlite)
+library(readr)
+library(shiny)
+library(leaflet)
+library(sf)
+library(tidygeocoder)
+library(tidyverse)
+library(plotly)
+library(shinydashboard)  
+library(shinyjs)
+library(DT)
+library(rsconnect)
+library(cli)
+
+# Conncetion shinyapps.io
+rsconnect::setAccountInfo(name='velovlyon',
+                          token='E32744C3E20F260ACAC4EA172656F650',
+                          secret='6oAL/Hr+lSv3hT8GixdEX+IAVZapzs5jGmXJCYUI')
+
+# Chargement du CVS des vélos
+base <- GET("https://api.jcdecaux.com/vls/v1/stations?contract=Lyon&apiKey=befc7e1bfaf203d6f666d5454eea82089d625254")
+bdd_velo <- fromJSON(rawToChar(base$content), flatten = TRUE)
+
+# Connection à la base FreeMySQL 
+
+#connection <- dbConnect(MySQL(),
+                        #user = 'sql11645728',
+                        #password = 'D4nmVTiTm4',
+                        #host = 'sql11.freesqldatabase.com',
+                        #dbname = 'sql11645728',
+                        #port = 3306)
+
+# Créer la table "Station"
+#dbSendQuery(connection, "CREATE TABLE Station (
+                         ###ID INT AUTO_INCREMENT PRIMARY KEY,
+                         ##Name VARCHAR(255),
+                         #Latitude FLOAT,
+                         #Longitude FLOAT,
+                         #CodePostal VARCHAR(10)
+                     #)")
+
+# Créer la table "Commune"
+#dbSendQuery(connection, "CREATE TABLE Commune (
+                        ## CodePostal VARCHAR(10) PRIMARY KEY,
+                        # NomCommune VARCHAR(255)
+                     #)")
+
+# Créer la table "Disponibilité des stations"
+#dbSendQuery(connection, "CREATE TABLE DisponibiliteStations (
+                         #ID INT AUTO_INCREMENT PRIMARY KEY,
+                         #StationID INT,
+                         #DateHeure DATETIME,
+                         #VelosDisponibles INT,
+                         #SupportsVeloDisponibles INT,
+                         #FOREIGN KEY (StationID) REFERENCES Station(ID)
+                     #)")
+
+# Fermer la connexion
+#dbDisconnect(connection)
+
+
+# Filtre codes postaux
+donnees_geocode <- bdd_velo[, c("position.lat", "position.lng")]
+codes_postaux <- character(0)
+
+for (i in 1:nrow(donnees_geocode)) {
+  latitude <- donnees_geocode[i, "position.lat"]
+  longitude <- donnees_geocode[i, "position.lng"]
+  
+  # Effectuez le géocodage inverse pour obtenir le code postal
+  resultat_geocode <- reverse_geocode(donnees_geocode, lat = position.lat, long = position.lng, method = 'osm', address = NULL, full_results = TRUE)
+  code_postal <- resultat_geocode$postcode
+}
+bdd_velo$code_postal <- code_postal
+
+# Shiny Apps
+ui <- dashboardPage(
+  dashboardHeader(title = "Vélo'v in Lyon"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Carte", tabName = "map", icon = icon("map")),
+      menuItem("Tableau de bord", tabName = "Dashboard", icon = icon("dashboard")),
+      menuItem("Source BDD", tabName = "rawData", icon = icon("table"))
+    )
+  ),
+  dashboardBody(
+    tabItems(
+      tabItem(
+        tabName = "map",
+        h2("Carte"),
+        fluidRow(
+          selectInput("commune", "Sélectionnez une commune :", choices = c("Total", unique(bdd_velo$code_postal))),
+          checkboxGroupInput("banking", "Paiement par carte bancaire :", c("Oui", "Non")),
+          tags$div(id = "refreshButtonPlaceholder", style = "display: none;"),
+          actionButton("refreshButton", "Actualiser les données"),  # Bouton de rafraîchissement
+          leafletOutput("map", width = "100%", height = "100vh")
+        )
+      ),
+      tabItem(
+        tabName = "Dashboard",
+        h2("Graphiques"),
+        fluidRow(
+          dashboardBody(
+            fluidRow(
+              valueBox(
+                value = textOutput("availableBikes"),
+                subtitle = "Vélos disponibles",
+                icon = icon("bicycle")
+              ),
+              valueBox(
+                value = textOutput("totalStations"),
+                subtitle = "Nombre total de stations",
+                icon = icon("map-marker")
+              )
+            ),
+            plotlyOutput("barChart"),
+            downloadButton("exportPNG", "Export PNG")
+          )
+        )
+      ),
+      tabItem(
+        tabName = "rawData",
+        h2("Base de données"),
+        fluidRow(
+          downloadButton("downloadCSV", "Télécharger en CSV"),
+          column(12, tableOutput("rawData"))
+        )
+      )
+    )
+  )
+)
+
+# Server Shiny
+
+server <- function(input, output) {
+  
+  # Affiche le bouton de rafraîchissement lorsque le bouton "Actualiser les données" est cliqué
+  observeEvent(input$refreshButton, {
+    shinyjs::show("refreshButtonPlaceholder")
+  })
+  # Carte
+  output$map <- renderLeaflet({
+    leaflet() %>%
+      addTiles() %>%
+      setView(lng = 4.8357, lat = 45.7578, zoom = 12) # Coordonnées pour Lyon
+  })
+  
+  output$availableBikes <- renderText({
+    # Filtrer les données en fonction des filtres sélectionnés
+    selected_data <- bdd_velo
+    
+    if (input$commune != "Total") {
+      selected_data <- selected_data[selected_data$code_postal == input$commune, ]
+    }
+    if ("Oui" %in% input$banking) {
+      selected_data <- selected_data[selected_data$banking == TRUE, ]
+    }
+    if ("Non" %in% input$banking) {
+      selected_data <- selected_data[selected_data$banking == FALSE, ]
+    }
+    
+    # Calculer le nombre de vélos disponibles
+    available_bikes <- sum(selected_data$available_bike_stands)
+    available_bikes
+  })
+  
+  output$totalStations <- renderText({
+    # Filtrer les données en fonction des filtres sélectionnés
+    selected_data <- bdd_velo
+    
+    if (input$commune != "Total") {
+      selected_data <- selected_data[selected_data$code_postal == input$commune, ]
+    }
+    if ("Oui" %in% input$banking) {
+      selected_data <- selected_data[selected_data$banking == TRUE, ]
+    }
+    if ("Non" %in% input$banking) {
+      selected_data <- selected_data[selected_data$banking == FALSE, ]
+    }
+    
+    # Calculer le nombre total de stations
+    total_stations <- nrow(selected_data)
+    total_stations
+  })
+  
+  output$rawData <- renderTable({
+    bdd_velo
+  })
+  
+  # Placement des points de stations
+  output$map <- renderLeaflet({
+    # Filtrer les données en fonction des filtres sélectionnés
+    if (input$commune == "Total") {
+      selected_data <- bdd_velo
+    } else {
+      selected_data <- bdd_velo[bdd_velo$code_postal == input$commune, ]
+    }
+    
+    # Filtre des paiements par carte bancaire
+    if ("Oui" %in% input$banking) {
+      selected_data <- selected_data[selected_data$banking == TRUE, ]
+    }
+    if ("Non" %in% input$banking) {
+      selected_data <- selected_data[selected_data$banking == FALSE, ]
+    }
+    
+    leaflet() %>%
+      addTiles() %>%
+      addMarkers(
+        data = selected_data,
+        ~position.lng, ~position.lat,
+        label = ~name
+      )
+  })
+  
+  # Création d'un bouton téléchargement csv
+  output$downloadCSV <- downloadHandler(
+    filename = function() {
+      paste("donnees_brutes.csv")
+    },
+    content = function(file) {
+      write.csv(bdd_velo, file)  # Exportez les données brutes au format CSV
+    }
+  )
+  
+  # Création d'un graphique en barres
+  output$barChart <- renderPlotly({
+    # Filtrer les données en fonction des filtres sélectionnés
+    if (input$commune == "Total") {
+      selected_data <- bdd_velo
+    } else {
+      selected_data <- bdd_velo[bdd_velo$code_postal == input$commune, ]
+    }
+    # Création d'un bouton d'exportation png
+    output$exportPNG <- downloadHandler(
+      filename = function() {
+        paste("bar_chart", ".png", sep = "")
+      },
+      content = function(file) {
+        # Sauvegardez le graphique en tant que fichier PNG
+        p <- ggplotly(bar_chart)  # bar_chart est votre graphique en barres
+        p %>% htmlwidgets::saveWidget(file)
+      }
+    )
+    # Filtrer par paiement par carte bancaire
+    if ("Oui" %in% input$banking) {
+      selected_data <- selected_data[selected_data$banking == TRUE, ]
+    }
+    if ("Non" %in% input$banking) {
+      selected_data <- selected_data[selected_data$banking == FALSE, ]
+    }
+    
+    # Compter le nombre de stations par commune
+    commune_counts <- table(selected_data$code_postal)
+    
+    # Créer un dataframe pour le graphique
+    commune_data <- data.frame(Commune = names(commune_counts), Stations = as.numeric(commune_counts))
+    
+    # Créer le graphique en barres
+    bar_chart <- plot_ly(data = commune_data, x = ~Commune, y = ~Stations, type = 'bar', marker = list(color = 'black'))
+    
+    bar_chart
+  })
+}
+
+# Afficher l'application
+shinyApp(ui, server)
